@@ -396,5 +396,5 @@ tensorboard --logdir outputs
 本项目使用或参考了以下项目中的部分实现：
 
 - [TransUNet](https://github.com/Beckschen/TransUNet)
-- [RWKV-UNet](https://github.com/GongRuiFeng/RWKV-UNet)
+- [RWKV-UNet](https://github.com/juntaoJianggavin/RWKV-UNet)
 - [Vision-RWKV](https://github.com/OpenGVLab/Vision-RWKV)
