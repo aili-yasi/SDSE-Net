@@ -1,0 +1,16 @@
+albumentations
+einops
+h5py
+matplotlib
+scikit-image
+scikit-learn
+scipy
+seaborn
+SimpleITK
+tensorboard
+timm
+# torch==2.0.0+cu118
+torchsummary==1.5.1
+# torchvision==0.15.1+cu118
+tqdm
+MedPy
