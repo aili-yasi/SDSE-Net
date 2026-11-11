@@ -1,145 +1,156 @@
 # SDSE-Net
 
-SDSE-Net 是一个面向医学图像语义分割的 2D 深度学习网络。模型保留了
-RWKV-UNet 编码器的主体结构和多尺度跳跃连接，在编码器最深层加入 Transformer
-bottleneck，并使用改进的解码器恢复空间分辨率。
+SDSE-Net is a 2D deep learning network for semantic segmentation of medical
+images. The model retains the main structure and multi-scale skip connections
+of the RWKV-UNet encoder, adds a Transformer bottleneck at the deepest encoder
+level, and uses an improved decoder to restore the spatial resolution.
 
-本仓库包含模型定义、Synapse/ACDC 数据集读取代码、训练脚本、测试脚本和批量测试
-工具。模型入口位于 [`SDSE_Net.py`](./SDSE_Net.py)，顶层网络类为
-`SDSE_Net`。
+This repository contains the model definition, Synapse/ACDC dataset loaders,
+training scripts, testing scripts, and batch testing tools. The model entry
+point is [`SDSE_Net.py`](./SDSE_Net.py), and the top-level network class is
+`SDSE_Net`.
 
-## 目录
+## Table of Contents
 
-- [项目结构](#项目结构)
-- [模型简介](#模型简介)
-- [模型结构与分割结果](#模型结构与分割结果)
-- [环境配置](#环境配置)
-- [数据集与模型权重下载](#数据集与模型权重下载)
-- [数据准备](#数据准备)
-- [预训练权重](#预训练权重)
-- [训练](#训练)
-- [测试与推理](#测试与推理)
-- [自动批量测试](#自动批量测试)
-- [输出文件](#输出文件)
-- [注意事项](#注意事项)
-- [致谢与引用](#致谢与引用)
+- [Project Structure](#project-structure)
+- [Model Overview](#model-overview)
+- [Model Architecture and Segmentation Results](#model-architecture-and-segmentation-results)
+- [Environment Setup](#environment-setup)
+- [Downloading Datasets and Model Weights](#downloading-datasets-and-model-weights)
+- [Data Preparation](#data-preparation)
+- [Pre-trained Weights](#pre-trained-weights)
+- [Training](#training)
+- [Testing and Inference](#testing-and-inference)
+- [Automatic Batch Testing](#automatic-batch-testing)
+- [Output Files](#output-files)
+- [Notes](#notes)
+- [Acknowledgments and Citation](#acknowledgments-and-citation)
 
-## 项目结构
+## Project Structure
 
 ```text
 SDSE-Net/
-├── SDSE_Net.py              # SDSE_Net、编码器和解码器定义
-├── train.py                 # 训练入口
-├── test.py                  # 测试和推理入口
-├── trainer.py               # Synapse、ACDC、BUSI 训练流程
-├── run_workflow.py          # 训练后自动批量测试
-├── auto_test_Synapse.py     # 批量测试 checkpoint
-├── utils.py                 # 损失函数、推理和评价工具
+├── SDSE_Net.py              # SDSE_Net, encoder, and decoder definitions
+├── train.py                 # Training entry point
+├── test.py                  # Testing and inference entry point
+├── trainer.py               # Synapse, ACDC, and BUSI training workflows
+├── run_workflow.py          # Automatic batch testing after training
+├── auto_test_Synapse.py     # Batch testing of checkpoints
+├── utils.py                 # Loss, inference, and evaluation utilities
 ├── module/
-│   └── basic_modules.py     # 基础网络模块
+│   └── basic_modules.py     # Basic network modules
 ├── ccm/
-│   ├── ccm.py               # CCM 特征融合模块
-│   └── main_blocks.py       # CCM 依赖模块
+│   ├── ccm.py               # CCM feature fusion module
+│   └── main_blocks.py       # CCM dependency modules
 ├── datasets/
-│   ├── dataset_synapse.py   # Synapse 数据读取
-│   └── dataset_acdc.py      # ACDC 数据读取
+│   ├── dataset_synapse.py   # Synapse data loading
+│   └── dataset_acdc.py      # ACDC data loading
 ├── cuda/
-│   ├── wkv_op.cpp           # WKV C++ 扩展
-│   └── wkv_cuda.cu          # WKV CUDA 实现
+│   ├── wkv_op.cpp           # WKV C++ extension
+│   └── wkv_cuda.cu          # WKV CUDA implementation
 ├── figs/
-│   ├── Figure_1.png         # 模型结构图
-│   └── Figure_2.png         # 分割结果可视化图
-├── lists/                   # 数据集列表文件
-├── ckpts/                   # 示例 checkpoint
-└── requirements.txt         # Python 依赖
+│   ├── Figure_1.png         # Model architecture diagram
+│   └── Figure_2.png         # Segmentation result visualization
+├── lists/                   # Dataset list files
+├── ckpts/                   # Example checkpoints
+└── requirements.txt         # Python dependencies
 ```
 
-## 模型简介
+## Model Overview
 
-SDSE-Net 的主要设计如下：
+The main design of SDSE-Net is as follows:
 
-1. **RWKV 编码器**  
-   使用 `RWKV_UNet_encoder_B` 作为编码器，通过多阶段特征提取逐步降低空间
-   分辨率并增加通道数。
+1. **RWKV encoder**  
+   `RWKV_UNet_encoder_B` is used as the encoder. It progressively reduces the
+   spatial resolution and increases the number of channels through multiple
+   feature extraction stages.
 2. **Transformer bottleneck**  
-   在编码器最深层的 `stage4` 后进行通道升维，经过多个 Transformer bottleneck
-   模块建模全局上下文，再将通道数映射回解码器所需的维度。
-3. **多尺度跳跃连接**  
-   编码器的中间层特征通过 `CCMix`/`CCM` 模块进行融合和增强，再与解码器
-   对应尺度的特征拼接。
-4. **改进解码器**  
-   解码阶段由 4 个 `UpBlock` 组成。每个模块包含卷积特征处理、投影层和
-   双线性上采样，用于逐步恢复特征图分辨率。
-5. **分割头**  
-   最后使用 `1x1` 卷积将 24 个通道映射为类别数，输出形状为
-   `(batch_size, num_classes, height, width)`。
+   After the deepest encoder level, `stage4`, the channel dimension is
+   increased. Multiple Transformer bottleneck modules model global context,
+   after which the channel dimension is mapped back to the dimensions required
+   by the decoder.
+3. **Multi-scale skip connections**  
+   Intermediate encoder features are fused and enhanced through the
+   `CCMix`/`CCM` modules, then concatenated with decoder features at the
+   corresponding scales.
+4. **Improved decoder**  
+   The decoding stage consists of four `UpBlock` modules. Each module includes
+   convolutional feature processing, a projection layer, and bilinear
+   upsampling to progressively restore the feature-map resolution.
+5. **Segmentation head**  
+   Finally, a `1x1` convolution maps 24 channels to the number of classes. The
+   output shape is `(batch_size, num_classes, height, width)`.
 
-当前 `SDSE_Net` 的默认配置为：
+The default configuration of `SDSE_Net` is:
 
-| 配置项 | 默认值 |
+| Configuration | Default value |
 |---|---:|
-| 输入通道数 | 1 |
-| 输入图像尺寸 | 224 × 224 |
-| 输出类别数 | Synapse 为 9 |
-| 编码器 | `RWKV_UNet_encoder_B` |
-| 预训练编码器权重 | `net_B.pth` |
+| Number of input channels | 1 |
+| Input image size | 224 × 224 |
+| Number of output classes | 9 for Synapse |
+| Encoder | `RWKV_UNet_encoder_B` |
+| Pre-trained encoder weights | `net_B.pth` |
 
-对于单通道输入，模型在前向传播开始时将图像复制为 3 个通道，以适配编码器
-的输入结构。
+For single-channel input, the model copies the image to three channels at the
+start of the forward pass to match the encoder's input structure.
 
-## 模型结构与分割结果
+## Model Architecture and Segmentation Results
 
-模型结构图和分割结果可视化图片位于 `figs` 文件夹中。
+The model architecture diagram and segmentation result visualizations are
+available in the `figs` directory.
 
-### 模型结构
+### Model Architecture
 
-![SDSE-Net 模型结构](./figs/Figure_1.png)
+![SDSE-Net model architecture](./figs/Figure_1.png)
 
-### 分割结果可视化
+### Segmentation Result Visualization
 
-![SDSE-Net 分割结果](./figs/Figure_2.png)
+![SDSE-Net segmentation results](./figs/Figure_2.png)
 
-## 环境配置
+## Environment Setup
 
-建议使用 Python 3.9，并使用支持 CUDA 的 PyTorch 环境。项目包含 CUDA 扩展
-源码 `cuda/wkv_op.cpp` 和 `cuda/wkv_cuda.cu`，因此运行模型时需要可用的 CUDA
-编译环境。
+Python 3.9 is recommended, together with a CUDA-enabled PyTorch environment.
+The project includes the CUDA extension source files `cuda/wkv_op.cpp` and
+`cuda/wkv_cuda.cu`, so a working CUDA compilation environment is required to
+run the model.
 
 ```bash
 conda create -n sdse-net python=3.9
 conda activate sdse-net
 
-# 请根据本机 CUDA 版本安装匹配的 PyTorch 和 torchvision
+# Install a version of PyTorch and torchvision matching your local CUDA version
 pip install torch torchvision
 pip install -r requirements.txt
 ```
 
-`requirements.txt` 中包含项目使用的主要依赖，包括：
+The main dependencies listed in `requirements.txt` include:
 
-- PyTorch 相关组件
+- PyTorch components
 - `timm`
 - `einops`
-- `numpy`、`scipy`、`scikit-image`
+- `numpy`, `scipy`, and `scikit-image`
 - `h5py`
 - `albumentations`
-- `SimpleITK`、`MedPy`
+- `SimpleITK` and `MedPy`
 - `tensorboard`
 
-## 数据集与模型权重下载
+## Downloading Datasets and Model Weights
 
-由于 GitHub 单个文件大小限制，以下五个文件未上传到本仓库，而是统一存放在
-[Hugging Face 模型仓库](https://huggingface.co/aili-yasi/SDSE-Net/tree/main)中。
-请进入该页面下载对应文件，并按照下表放置到项目目录：
+Because of GitHub's per-file size limit, the following five files are not
+included in this repository. They are hosted in the
+[Hugging Face model repository](https://huggingface.co/aili-yasi/SDSE-Net/tree/main).
+Download the corresponding files from that page and place them in the project
+directory as shown below:
 
-| Hugging Face 文件 | 下载后放置位置 | 用途 |
+| Hugging Face file | Destination after download | Purpose |
 |---|---|---|
-| `net_B.pth` | 项目根目录 `net_B.pth` | 编码器预训练权重 |
-| `Synapse.zip` | 项目根目录 `data/Synapse.zip`，然后解压为 `data/Synapse/` | Synapse 数据集 |
-| `transunet_ACDC.zip` | 项目根目录 `data/transunet_ACDC.zip`，然后解压为 `data/ACDC/` | ACDC 数据集 |
-| `ckpts/Synapse_base.pth` | `ckpts/Synapse_base.pth` | Synapse 完整模型 checkpoint |
-| `ckpts/acdc_base.pth` | `ckpts/acdc_base.pth` | ACDC 完整模型 checkpoint |
+| `net_B.pth` | `net_B.pth` in the project root | Pre-trained encoder weights |
+| `Synapse.zip` | `data/Synapse.zip` in the project root, then extract to `data/Synapse/` | Synapse dataset |
+| `transunet_ACDC.zip` | `data/transunet_ACDC.zip` in the project root, then extract to `data/ACDC/` | ACDC dataset |
+| `ckpts/Synapse_base.pth` | `ckpts/Synapse_base.pth` | Complete Synapse model checkpoint |
+| `ckpts/acdc_base.pth` | `ckpts/acdc_base.pth` | Complete ACDC model checkpoint |
 
-下载并解压后，项目目录应至少包含以下结构：
+After downloading and extracting the files, the project should contain at least:
 
 ```text
 SDSE-Net/
@@ -156,15 +167,16 @@ SDSE-Net/
     └── acdc_base.pth
 ```
 
-如果压缩包解压后产生了额外的同名父目录，请调整目录层级，确保训练和测试脚本能够
-直接访问 `data/Synapse/` 或 `data/ACDC/`。运行脚本时请始终使用项目根目录作为当前
-工作目录。
+If extraction creates an additional same-named parent directory, adjust the
+directory hierarchy so that the training and testing scripts can access
+`data/Synapse/` or `data/ACDC/` directly. Always use the project root as the
+working directory when running the scripts.
 
-## 数据准备
+## Data Preparation
 
 ### Synapse
 
-训练脚本默认读取：
+The training script reads the following paths by default:
 
 ```text
 data/Synapse/train_npz/
@@ -172,7 +184,7 @@ lists/lists_Synapse/train.txt
 lists/lists_Synapse/test_vol.txt
 ```
 
-推荐的数据组织形式为：
+The recommended data layout is:
 
 ```text
 data/
@@ -185,20 +197,25 @@ data/
         └── ...
 ```
 
-Synapse 的训练和测试读取方式不同：
+Synapse uses different loading procedures for training and testing:
 
-- 训练时，`lists/lists_Synapse/train.txt` 中每行是一个样本名，不带扩展名；
-  数据加载器从 `train_npz/<样本名>.npz` 读取 `image` 和 `label` 数组。
-- 测试时，`lists/lists_Synapse/test_vol.txt` 中每行是一个病例名，不带扩展名；
-  数据加载器从 `test_vol_h5/<病例名>.npy.h5` 读取 `image` 和 `label` 数组。
-- 训练图像会经过 `RandomGenerator` 处理：按需进行亮度/对比度变化和随机裁剪，
-  然后使用最近邻插值调整到 `img_size × img_size`，并转换为单通道张量。
-- 测试体数据不使用训练增强；测试脚本通过 `test_single_volume` 对每个病例的
-  2D 切片进行推理，并计算各类别 Dice 和 HD95。
+- During training, each line in `lists/lists_Synapse/train.txt` contains a
+  sample name without an extension. The data loader reads the `image` and
+  `label` arrays from `train_npz/<sample_name>.npz`.
+- During testing, each line in `lists/lists_Synapse/test_vol.txt` contains a
+  case name without an extension. The data loader reads the `image` and
+  `label` arrays from `test_vol_h5/<case_name>.npy.h5`.
+- Training images are processed by `RandomGenerator`, which applies brightness
+  and contrast changes and random cropping when needed, resizes them to
+  `img_size × img_size` using nearest-neighbor interpolation, and converts
+  them to single-channel tensors.
+- Test volumes do not use training augmentation. The testing script performs
+  inference on the 2D slices of each case through `test_single_volume` and
+  calculates Dice and HD95 for each class.
 
 ### ACDC
 
-ACDC 数据根目录默认为 `data/ACDC`，目录结构应为：
+The default ACDC data root is `data/ACDC`, with the following structure:
 
 ```text
 data/
@@ -211,52 +228,57 @@ data/
         └── ...
 ```
 
-ACDC 数据划分和文件读取逻辑位于
-[`datasets/dataset_acdc.py`](./datasets/dataset_acdc.py) 中：
+The ACDC data split and file-loading logic are defined in
+[`datasets/dataset_acdc.py`](./datasets/dataset_acdc.py):
 
-- `patient001` 至 `patient020`：测试集
-- `patient021` 至 `patient030`：验证集
-- 其余病例：训练集
+- `patient001` to `patient020`: test set
+- `patient021` to `patient030`: validation set
+- All remaining cases: training set
 
-具体读取方式如下：
+The loading procedures are:
 
-- 训练阶段从 `ACDC_training_slices/` 读取切片级 `.h5` 文件中的 `image` 和
-  `label` 数据，并使用 `RandomGenerator` 进行随机翻转、随机旋转、亮度/对比度
-  变化和随机裁剪，再调整到 `img_size × img_size`。
-- 验证和测试阶段从 `ACDC_training_volumes/` 读取体数据 `.h5` 文件，不使用
-  `RandomGenerator`。
-- 每个 ACDC `.h5` 文件应包含 `image` 和 `label` 两个数据集。测试时，病例名由
-  文件名去掉 `.h5` 后得到。
+- During training, slice-level `.h5` files are read from
+  `ACDC_training_slices/`. Their `image` and `label` data are processed with
+  `RandomGenerator`, which applies random flipping, random rotation,
+  brightness/contrast changes, and random cropping before resizing to
+  `img_size × img_size`.
+- During validation and testing, volume `.h5` files are read from
+  `ACDC_training_volumes/` without `RandomGenerator`.
+- Each ACDC `.h5` file must contain `image` and `label` datasets. During
+  testing, the case name is obtained by removing `.h5` from the filename.
 
 ### BUSI
 
-训练和测试脚本保留了 BUSI 数据集的配置入口，但当前仓库中未包含
-`datasets/dataset_busi.py`。如果需要运行 BUSI，需要补充对应的数据集实现以及
-数据目录。
+The training and testing scripts retain configuration entry points for the
+BUSI dataset, but this repository currently does not include
+`datasets/dataset_busi.py`. To run BUSI, the corresponding dataset
+implementation and data directory must be added.
 
-## 预训练权重
+## Pre-trained Weights
 
-`SDSE_Net` 默认尝试加载编码器预训练权重：
+By default, `SDSE_Net` attempts to load the following pre-trained encoder
+weights:
 
 ```text
 net_B.pth
 ```
 
-训练时可以通过 `--pretrained_path` 指定权重文件：
+You can specify a weight file during training with `--pretrained_path`:
 
 ```bash
 python train.py --pretrained_path path/to/net_B.pth
 ```
 
-如果不使用编码器预训练权重，可以传入空值或在模型构造时设置
-`pretrained_path=None`。测试阶段默认不重新加载编码器预训练权重，而是加载完整
-分割模型的 checkpoint。
+To disable pre-trained encoder weights, pass an empty value or set
+`pretrained_path=None` when constructing the model. During testing, the
+pre-trained encoder weights are not loaded again by default; instead, the
+complete segmentation model checkpoint is loaded.
 
-## 训练
+## Training
 
-请在项目根目录执行训练命令。
+Run training commands from the project root.
 
-### Synapse 训练示例
+### Synapse Training Example
 
 ```bash
 python train.py ^
@@ -268,48 +290,49 @@ python train.py ^
   --pretrained_path net_B.pth
 ```
 
-PowerShell 或 Linux/macOS 中也可以写成一行：
+In PowerShell or Linux/macOS, the command can also be written on one line:
 
 ```bash
 python train.py --dataset Synapse --max_epochs 30 --batch_size 24 --base_lr 0.001 --img_size 224 --pretrained_path net_B.pth
 ```
 
-### ACDC 训练示例
+### ACDC Training Example
 
 ```bash
 python train.py --dataset ACDC --max_epochs 30 --batch_size 24 --base_lr 0.001 --img_size 224 --pretrained_path net_B.pth
 ```
 
-### 常用训练参数
+### Common Training Arguments
 
-| 参数 | 默认值 | 说明 |
+| Argument | Default | Description |
 |---|---:|---|
-| `--dataset` | `Synapse` | `Synapse`、`ACDC` 或 `busi` |
-| `--max_epochs` | `30` | 最大训练轮数 |
-| `--max_iterations` | `30000` | 最大迭代数，用于输出目录命名 |
-| `--batch_size` | `24` | 每个 GPU 的 batch size |
-| `--base_lr` | `0.001` | 初始学习率 |
-| `--img_size` | `224` | 输入图像边长 |
-| `--gpu` | `0` | 使用的 GPU 编号 |
-| `--n_gpu` | `1` | GPU 数量参数 |
-| `--seed` | `1234` | 随机种子 |
-| `--pretrained_path` | `net_B.pth` | 编码器预训练权重路径 |
+| `--dataset` | `Synapse` | `Synapse`, `ACDC`, or `busi` |
+| `--max_epochs` | `30` | Maximum number of training epochs |
+| `--max_iterations` | `30000` | Maximum number of iterations, used for output directory naming |
+| `--batch_size` | `24` | Batch size per GPU |
+| `--base_lr` | `0.001` | Initial learning rate |
+| `--img_size` | `224` | Input image side length |
+| `--gpu` | `0` | GPU index to use |
+| `--n_gpu` | `1` | Number of GPUs |
+| `--seed` | `1234` | Random seed |
+| `--pretrained_path` | `net_B.pth` | Path to pre-trained encoder weights |
 
-训练过程使用 AdamW 优化器，并记录交叉熵损失、Dice 损失和总损失。不同数据集
-的训练函数位于 [`trainer.py`](./trainer.py)。
+Training uses the AdamW optimizer and records cross-entropy loss, Dice loss,
+and total loss. The training functions for each dataset are located in
+[`trainer.py`](./trainer.py).
 
-## 测试与推理
+## Testing and Inference
 
-### 使用默认 checkpoint 测试
+### Test with the Default Checkpoint
 
 ```bash
 python test.py --dataset Synapse --img_size 224
 ```
 
-测试脚本会在训练输出目录中查找 `best_model.pth`；如果不存在，则尝试查找对应
-的 epoch checkpoint。
+The testing script searches the training output directory for `best_model.pth`.
+If it does not exist, it tries to find the corresponding epoch checkpoint.
 
-### 指定 checkpoint 测试
+### Test with a Specific Checkpoint
 
 ```bash
 python test.py ^
@@ -318,47 +341,51 @@ python test.py ^
   --path_specific ckpts/Synapse_base.pth
 ```
 
-Linux/macOS 或 PowerShell 中的一行写法：
+On Linux/macOS or PowerShell, the one-line form is:
 
 ```bash
 python test.py --dataset Synapse --img_size 224 --path_specific ckpts/Synapse_base.pth
 ```
 
-### 保存预测结果
+### Save Prediction Results
 
-添加 `--is_savenii` 后，测试结果会保存到 `predictions` 目录：
+Add `--is_savenii` to save test results to the `predictions` directory:
 
 ```bash
 python test.py --dataset Synapse --img_size 224 --path_specific ckpts/Synapse_base.pth --is_savenii
 ```
 
-测试阶段会计算每个类别的 Dice 和 HD95，并在日志中输出平均结果。
+During testing, Dice and HD95 are calculated for each class, and the average
+results are printed to the log.
 
-## 自动批量测试
+## Automatic Batch Testing
 
-`auto_test_Synapse.py` 可以自动寻找指定目录中的 `.pth` 文件，并按照文件名中的
-数字排序后逐个运行测试：
+`auto_test_Synapse.py` automatically finds `.pth` files in a specified
+directory, sorts them by the numbers in their filenames, and tests them one by
+one:
 
 ```bash
 python auto_test_Synapse.py --weights_dir outputs/rwkvSynapse224/exp1_pretrain_...
 ```
 
-也可以使用 [`run_workflow.py`](./run_workflow.py) 自动执行训练和批量测试：
+You can also use [`run_workflow.py`](./run_workflow.py) to automatically run
+training and batch testing:
 
 ```bash
 python run_workflow.py --dataset Synapse --max_epochs 30 --img_size 224
 ```
 
-该脚本会：
+This script:
 
-1. 调用 `train.py` 训练模型；
-2. 根据训练参数计算输出目录；
-3. 调用 `auto_test_Synapse.py` 测试目录中的 checkpoint。
+1. Calls `train.py` to train the model.
+2. Calculates the output directory from the training arguments.
+3. Calls `auto_test_Synapse.py` to test the checkpoints in that directory.
 
-## 输出文件
+## Output Files
 
-训练输出目录由数据集、图像尺寸、训练轮数、batch size、学习率和随机种子共同
-决定，默认形式类似：
+The training output directory is determined by the dataset, image size, number
+of training epochs, batch size, learning rate, and random seed. Its default
+form is similar to:
 
 ```text
 outputs/
@@ -369,31 +396,36 @@ outputs/
         └── ...
 ```
 
-训练日志和 TensorBoard 标量写入对应的实验目录。可以使用 TensorBoard 查看训练
-曲线：
+Training logs and TensorBoard scalars are written to the corresponding
+experiment directory. Use TensorBoard to view the training curves:
 
 ```bash
 tensorboard --logdir outputs
 ```
 
-测试日志默认写入 `test_log`，启用 `--is_savenii` 时预测结果写入
-`predictions/<experiment>/<checkpoint>/`。
+Testing logs are written to `test_log` by default. When `--is_savenii` is
+enabled, prediction results are written to
+`predictions/<experiment>/<checkpoint>/`.
 
-## 注意事项
+## Notes
 
-1. 请始终在项目根目录运行脚本，否则相对路径
-   `data/`、`lists/`、`cuda/` 和权重路径可能无法正确解析。
-2. 当前训练和测试入口使用 CUDA；运行前请确认 `torch.cuda.is_available()` 为
-   `True`，并安装与本机驱动匹配的 PyTorch。
-3. `SDSE_Net.py` 导入时会编译/加载 WKV CUDA 扩展，首次运行可能需要较长时间。
-4. `--img_size` 应与训练 checkpoint 使用的尺寸保持一致。
-5. `--num_classes` 会根据数据集配置自动设置，通常不需要手动修改。
-6. Windows 命令行使用 `^` 换行，Linux/macOS 使用反斜杠 `\` 换行；也可以直接
-   使用单行命令。
+1. Always run scripts from the project root. Otherwise, relative paths such as
+   `data/`, `lists/`, `cuda/`, and the weight paths may not be resolved
+   correctly.
+2. The current training and testing entry points use CUDA. Before running,
+   verify that `torch.cuda.is_available()` is `True` and install a PyTorch
+   version compatible with the local driver.
+3. Importing `SDSE_Net.py` compiles or loads the WKV CUDA extension. The first
+   run may take a considerable amount of time.
+4. `--img_size` should match the size used by the training checkpoint.
+5. `--num_classes` is set automatically according to the dataset configuration
+   and usually does not need to be changed manually.
+6. Use `^` for line continuation in the Windows command prompt and a
+   backslash `\` in Linux/macOS. Single-line commands can also be used.
 
-## 致谢与引用
+## Acknowledgments and Citation
 
-本项目使用或参考了以下项目中的部分实现：
+This project uses or references parts of the following projects:
 
 - [TransUNet](https://github.com/Beckschen/TransUNet)
 - [RWKV-UNet](https://github.com/juntaoJianggavin/RWKV-UNet)
